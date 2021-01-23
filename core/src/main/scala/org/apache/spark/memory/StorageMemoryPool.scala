@@ -91,6 +91,14 @@ private[memory] class StorageMemoryPool(
     if (numBytesToFree > 0) {
       memoryStore.evictBlocksToFreeSpace(Some(blockId), numBytesToFree, memoryMode)
     }
+    if (SigVE.can_grow(memoryUsed, numBytesToAcquire)) {
+      logInfo(s"[sigve] StorageMemoryPool#acquireMemory block ${blockId} to acquire ${numBytesToAcquire} to free ${numBytesToFree}, adaptive says yes")
+    } else {
+      logInfo(s"[sigve] StorageMemoryPool#acquireMemory block ${blockId} to acquire ${numBytesToAcquire} to free ${numBytesToFree}, adaptive says no")
+      val reclaimed = memoryStore.evictBlocksToFreeSpace(Some(blockId), numBytesToAcquire, memoryMode);
+      logInfo(s"[sigve] StorageMemoryPool#acquireMemory block ${blockId} to acquire ${numBytesToAcquire} reclaimed ${reclaimed}")
+    }
+
     // NOTE: If the memory store evicts blocks, then those evictions will synchronously call
     // back into this StorageMemoryPool in order to free memory. Therefore, these variables
     // should have been updated.
@@ -130,9 +138,28 @@ private[memory] class StorageMemoryPool(
         memoryStore.evictBlocksToFreeSpace(None, remainingSpaceToFree, memoryMode)
       // When a block is released, BlockManager.dropFromMemory() calls releaseMemory(), so we do
       // not need to decrement _memoryUsed here. However, we do need to decrement the pool size.
+      logInfo(s"[krgc] StorageMemoryPool#freeSpaceToShrinkPool freed ${spaceFreedByEviction} space by eviction, releasing unused memory ${spaceFreedByReleasingUnusedMemory}")
       spaceFreedByReleasingUnusedMemory + spaceFreedByEviction
     } else {
       spaceFreedByReleasingUnusedMemory
     }
+  }
+
+  /**
+   * Free space to shrink the size of this storage memory pool by `spaceToFree` bytes.
+   * Note: this method doesn't actually reduce the pool size but relies on the caller to do so.
+   *
+   * @return number of bytes to be removed from the pool's capacity.
+   */
+  def sigveFreeSpaceToShrinkPool(): Long = lock.synchronized {
+    if (memoryUsed < 1024 * 1024 * 1024) {
+      return 0
+    }
+    val spaceToFree = memoryUsed / 8
+    val spaceFreedByEviction =
+      memoryStore.evictBlocksToFreeSpace(None, spaceToFree, memoryMode)
+    // When a block is released, BlockManager.dropFromMemory() calls releaseMemory(), so we do
+    // not need to decrement _memoryUsed here. However, we do need to decrement the pool size.
+    spaceFreedByEviction
   }
 }

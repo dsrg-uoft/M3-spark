@@ -376,6 +376,7 @@ private[spark] class BlockManager(
     if (blockId.isShuffle) {
       shuffleManager.shuffleBlockResolver.getBlockData(blockId.asInstanceOf[ShuffleBlockId])
     } else {
+      logInfo(s"[sigve] BlockManager.getBlockData ${blockId}, ${blockId.toString}")
       getLocalBytes(blockId) match {
         case Some(blockData) =>
           new BlockManagerManagedBuffer(blockInfoManager, blockId, blockData, true)
@@ -509,6 +510,7 @@ private[spark] class BlockManager(
    * Must be called while holding a read lock on the block.
    */
   private def handleLocalReadFailure(blockId: BlockId): Nothing = {
+    logInfo(s"[sive] handleLocalReadFailure(${blockId})")
     releaseLock(blockId)
     // Remove the missing block so that its unavailability is reported to the driver
     removeBlock(blockId)
@@ -571,10 +573,11 @@ private[spark] class BlockManager(
    * Get block from the local block manager as serialized bytes.
    */
   def getLocalBytes(blockId: BlockId): Option[BlockData] = {
-    logDebug(s"Getting local block $blockId as bytes")
+    logInfo(s"Getting local block $blockId as bytes")
     // As an optimization for map output fetches, if the block is for a shuffle, return it
     // without acquiring a lock; the disk store never deletes (recent) items so this should work
     if (blockId.isShuffle) {
+      logInfo(s"[sigve] getLocalBytes(${blockId}) is shuffle")
       val shuffleBlockResolver = shuffleManager.shuffleBlockResolver
       // TODO: This should gracefully handle case where local block is not available. Currently
       // downstream code will throw an exception.
@@ -582,6 +585,7 @@ private[spark] class BlockManager(
         shuffleBlockResolver.getBlockData(blockId.asInstanceOf[ShuffleBlockId]).nioByteBuffer())
       Some(new ByteBufferBlockData(buf, true))
     } else {
+      logInfo(s"[sigve] getLocalBytes(${blockId}) not shuffle")
       blockInfoManager.lockForReading(blockId).map { info => doGetLocalBytes(blockId, info) }
     }
   }
@@ -594,7 +598,7 @@ private[spark] class BlockManager(
    */
   private def doGetLocalBytes(blockId: BlockId, info: BlockInfo): BlockData = {
     val level = info.level
-    logDebug(s"Level for block $blockId is $level")
+    logInfo(s"Level for block $blockId is $level")
     // In order, try to read the serialized bytes from memory, then from disk, then fall back to
     // serializing in-memory objects, and, finally, throw an exception if the block does not exist.
     if (level.deserialized) {
@@ -604,6 +608,7 @@ private[spark] class BlockManager(
         // handles deserialized blocks, this block may only be cached in memory as objects, not
         // serialized bytes. Because the caller only requested bytes, it doesn't make sense to
         // cache the block's deserialized objects since that caching may not have a payoff.
+        logInfo(s"[sigve] diskStore.getBytes(${blockId})")
         diskStore.getBytes(blockId)
       } else if (level.useMemory && memoryStore.contains(blockId)) {
         // The block was not found on disk, so serialize an in-memory copy:
@@ -616,6 +621,7 @@ private[spark] class BlockManager(
       if (level.useMemory && memoryStore.contains(blockId)) {
         new ByteBufferBlockData(memoryStore.getBytes(blockId).get, false)
       } else if (level.useDisk && diskStore.contains(blockId)) {
+        logInfo(s"[sigve] level.useDisk and diskStore.contains ${blockId}")
         val diskData = diskStore.getBytes(blockId)
         maybeCacheDiskBytesInMemory(info, blockId, level, diskData)
           .map(new ByteBufferBlockData(_, false))
@@ -807,6 +813,8 @@ private[spark] class BlockManager(
       case _ =>
         // Need to compute the block.
     }
+    val t0 = System.nanoTime()
+    val tid = Thread.currentThread().getId()
     // Initially we hold no locks on this block.
     doPutIterator(blockId, makeIterator, level, classTag, keepReadLock = true) match {
       case None =>
@@ -822,12 +830,16 @@ private[spark] class BlockManager(
         // acquires the lock again, so we need to call releaseLock() here so that the net number
         // of lock acquisitions is 1 (since the caller will only call release() once).
         releaseLock(blockId)
+        val t = System.nanoTime() - t0
+        logInfo(s"[krgc] getOrElseUpdate doPutIterator (ns) t: $tid : $t")
         Left(blockResult)
       case Some(iter) =>
         // The put failed, likely because the data was too large to fit in memory and could not be
         // dropped to disk. Therefore, we need to pass the input iterator back to the caller so
         // that they can decide what to do with the values (e.g. process them without caching).
-       Right(iter)
+        val t = System.nanoTime() - t0
+        logInfo(s"[krgc] getOrElseUpdate failed doPutIterator (ns) t: $tid : $t")
+        Right(iter)
     }
   }
 
@@ -999,6 +1011,7 @@ private[spark] class BlockManager(
 
     require(blockId != null, "BlockId is null")
     require(level != null && level.isValid, "StorageLevel is null or invalid")
+    logInfo(s"[sigve] BlockManager#doPut block ${blockId}")
 
     val putBlockInfo = {
       val newInfo = new BlockInfo(level, classTag, tellMaster)
@@ -1420,7 +1433,6 @@ private[spark] class BlockManager(
   private[storage] override def dropFromMemory[T: ClassTag](
       blockId: BlockId,
       data: () => Either[Array[T], ChunkedByteBuffer]): StorageLevel = {
-    logInfo(s"Dropping block $blockId from memory")
     val info = blockInfoManager.assertBlockIsLockedForWriting(blockId)
     var blockIsUpdated = false
     val level = info.level
@@ -1446,6 +1458,7 @@ private[spark] class BlockManager(
     // Actually drop from memory store
     val droppedMemorySize =
       if (memoryStore.contains(blockId)) memoryStore.getSize(blockId) else 0L
+    logInfo(s"Dropping block $blockId from memory, bytes ${droppedMemorySize}")
     val blockIsRemoved = memoryStore.remove(blockId)
     if (blockIsRemoved) {
       blockIsUpdated = true
@@ -1471,8 +1484,12 @@ private[spark] class BlockManager(
   def removeRdd(rddId: Int): Int = {
     // TODO: Avoid a linear scan by creating another mapping of RDD.id to blocks.
     logInfo(s"Removing RDD $rddId")
+    val t0 = System.nanoTime()
     val blocksToRemove = blockInfoManager.entries.flatMap(_._1.asRDDId).filter(_.rddId == rddId)
     blocksToRemove.foreach { blockId => removeBlock(blockId, tellMaster = false) }
+    val t1 = System.nanoTime()
+    val t = t1 - t0
+    logInfo(s"[krgc] removeRdd $rddId (ns): $t")
     blocksToRemove.size
   }
 

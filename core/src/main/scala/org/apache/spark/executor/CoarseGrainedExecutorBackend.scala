@@ -56,6 +56,21 @@ private[spark] class CoarseGrainedExecutorBackend(
   private[this] val ser: SerializerInstance = env.closureSerializer.newInstance()
 
   override def onStart() {
+    if (org.apache.spark.memory.SigVE.enabled()) {
+      try {
+        val handler: sun.misc.SignalHandler = new sun.misc.SignalHandler() {
+          override def handle(sig: sun.misc.Signal): Unit = {
+            logInfo(s"[sigve] CoarseGrainedExecutorBackend handler: sig ${sig}, handling signal ${org.apache.spark.memory.SigVE.handling_signal}")
+            org.apache.spark.memory.SigVE.okotemasu();
+          }
+        };
+        //sun.misc.Signal.handle(new sun.misc.Signal("VE"), handler)
+        sun.misc.Signal.handle(new sun.misc.Signal("VF"), handler)
+        logInfo("[sigve] registered signal handler.")
+      } catch {
+        case ex: IllegalArgumentException => throw new RuntimeException(ex);
+      }
+    }
     logInfo("Connecting to driver: " + driverUrl)
     rpcEnv.asyncSetupEndpointRefByURI(driverUrl).flatMap { ref =>
       // This is a very fast action so we can use "ThreadUtils.sameThread"

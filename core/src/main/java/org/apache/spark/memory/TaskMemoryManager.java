@@ -139,6 +139,7 @@ public class TaskMemoryManager {
     assert(required >= 0);
     assert(consumer != null);
     MemoryMode mode = consumer.getMode();
+    logger.info("[sigve] TaskMemoryManager#acquireExecutionMemory with mode {}", mode);
     // If we are allocating Tungsten pages off-heap and receive a request to allocate on-heap
     // memory here, then it may not make sense to spill since that would only end up freeing
     // off-heap memory. This is subject to change, though, so it may be risky to make this

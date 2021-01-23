@@ -145,6 +145,7 @@ private[spark] class MemoryStore(
       memoryMode: MemoryMode,
       _bytes: () => ChunkedByteBuffer): Boolean = {
     require(!contains(blockId), s"Block $blockId is already present in the MemoryStore")
+    logInfo(s"[sigve] MemoryStore#putBytes block ${blockId}")
     if (memoryManager.acquireStorageMemory(blockId, size, memoryMode)) {
       // We acquired enough memory for the block, so go ahead and put it
       val bytes = _bytes()
@@ -181,8 +182,11 @@ private[spark] class MemoryStore(
       blockId: BlockId,
       values: Iterator[T],
       classTag: ClassTag[T]): Either[PartiallyUnrolledIterator[T], Long] = {
+    val t0 = System.nanoTime()
 
     require(!contains(blockId), s"Block $blockId is already present in the MemoryStore")
+
+    logInfo(s"[sigve] MemoryStore#putIteratorAsValues blockId ${blockId}")
 
     // Number of elements unrolled so far
     var elementsUnrolled = 0
@@ -276,6 +280,8 @@ private[spark] class MemoryStore(
       } else {
         assert(currentUnrollMemoryForThisTask >= unrollMemoryUsedByThisBlock,
           "released too much unroll memory")
+        val t = System.nanoTime() - t0
+        logInfo(s"[krgc] HadoopRDD getNext (ns): $t")
         Left(new PartiallyUnrolledIterator(
           this,
           MemoryMode.ON_HEAP,
@@ -284,6 +290,8 @@ private[spark] class MemoryStore(
           rest = Iterator.empty))
       }
     } else {
+      val t = System.nanoTime() - t0
+      logInfo(s"[krgc] HadoopRDD getNext (ns): $t")
       // We ran out of space while unrolling the values for this block
       logUnrollFailureMessage(blockId, vector.estimateSize())
       Left(new PartiallyUnrolledIterator(
@@ -318,6 +326,8 @@ private[spark] class MemoryStore(
       memoryMode: MemoryMode): Either[PartiallySerializedBlock[T], Long] = {
 
     require(!contains(blockId), s"Block $blockId is already present in the MemoryStore")
+    logInfo(s"[sigve] MemoryStore#putIteratorAsBytes block ${blockId}")
+
 
     val allocator = memoryMode match {
       case MemoryMode.ON_HEAP => ByteBuffer.allocate _
@@ -503,7 +513,9 @@ private[spark] class MemoryStore(
       space: Long,
       memoryMode: MemoryMode): Long = {
     assert(space > 0)
+    logInfo(s"[sigve] MemoryStore#evictBlocksToFreeSpace: blockId $blockId")
     memoryManager.synchronized {
+      val t0 = System.nanoTime()
       var freedMemory = 0L
       val rddToAdd = blockId.flatMap(getRddId)
       val selectedBlocks = new ArrayBuffer[BlockId]
@@ -532,12 +544,14 @@ private[spark] class MemoryStore(
       }
 
       def dropBlock[T](blockId: BlockId, entry: MemoryEntry[T]): Unit = {
+        val t1 = System.currentTimeMillis();
         val data = entry match {
           case DeserializedMemoryEntry(values, _, _) => Left(values)
           case SerializedMemoryEntry(buffer, _, _) => Right(buffer)
         }
         val newEffectiveStorageLevel =
           blockEvictionHandler.dropFromMemory(blockId, () => data)(entry.classTag)
+        val t2 = System.currentTimeMillis();
         if (newEffectiveStorageLevel.isValid) {
           // The block is still present in at least one store, so release the lock
           // but don't delete the block info
@@ -547,6 +561,8 @@ private[spark] class MemoryStore(
           // block can be stored again
           blockInfoManager.removeBlock(blockId)
         }
+        val t3 = System.currentTimeMillis();
+        logInfo(s"[sigve] dropBlock(${blockId}) took ${t3 - t1} ms (${t2 - t1}, ${t3 - t2}), ${newEffectiveStorageLevel.isValid}., ${entries.size()}")
       }
 
       if (freedMemory >= space) {
@@ -554,6 +570,7 @@ private[spark] class MemoryStore(
         try {
           logInfo(s"${selectedBlocks.size} blocks selected for dropping " +
             s"(${Utils.bytesToString(freedMemory)} bytes)")
+          val t6 = System.currentTimeMillis();
           (0 until selectedBlocks.size).foreach { idx =>
             val blockId = selectedBlocks(idx)
             val entry = entries.synchronized {
@@ -564,12 +581,19 @@ private[spark] class MemoryStore(
             // future safety.
             if (entry != null) {
               dropBlock(blockId, entry)
+              val t4 = System.currentTimeMillis();
               afterDropAction(blockId)
+              val t5 = System.currentTimeMillis();
+              logInfo(s"[sigve] afterDropAction(${blockId}) took ${t5 - t4} ms.")
             }
             lastSuccessfulBlock = idx
           }
+          val t7 = System.currentTimeMillis();
+          logInfo(s"[sigve] dropping all blocks took ${t7 - t6} ms.")
           logInfo(s"After dropping ${selectedBlocks.size} blocks, " +
             s"free memory is ${Utils.bytesToString(maxMemory - blocksMemoryUsed)}")
+          val t = System.nanoTime() - t0
+          logInfo(s"[krgc] evictBlocksToFreeSpace (ns): $t")
           freedMemory
         } finally {
           // like BlockManager.doPut, we use a finally rather than a catch to avoid having to deal

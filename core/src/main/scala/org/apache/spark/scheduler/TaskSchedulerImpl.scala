@@ -343,6 +343,7 @@ private[spark] class TaskSchedulerImpl(
     }.getOrElse(offers)
 
     val shuffledOffers = shuffleOffers(filteredOffers)
+    logInfo(s"[sigve] TaskSchedulerImpl#resourceOffers ${shuffledOffers}")
     // Build a list of tasks to assign to each worker.
     val tasks = shuffledOffers.map(o => new ArrayBuffer[TaskDescription](o.cores / CPUS_PER_TASK))
     val availableCpus = shuffledOffers.map(o => o.cores).toArray

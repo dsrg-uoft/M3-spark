@@ -245,6 +245,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
           case (id, executorData) =>
             new WorkerOffer(id, executorData.executorHost, executorData.freeCores)
         }.toIndexedSeq
+        logInfo(s"[sigve] in CoarseGrainedExecutorBackend#makeOffers()")
         scheduler.resourceOffers(workOffers)
       }
       if (!taskDescs.isEmpty) {
@@ -269,6 +270,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
           val executorData = executorDataMap(executorId)
           val workOffers = IndexedSeq(
             new WorkerOffer(executorId, executorData.executorHost, executorData.freeCores))
+          logInfo(s"[sigve] in CoarseGrainedSchedulerBackend#makeOffers(${executorId}) with ${executorData.executorHost}, ${executorData.freeCores}")
           scheduler.resourceOffers(workOffers)
         } else {
           Seq.empty

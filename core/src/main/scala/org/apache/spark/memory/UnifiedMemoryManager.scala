@@ -55,6 +55,25 @@ private[spark] class UnifiedMemoryManager private[memory] (
     onHeapStorageRegionSize,
     maxHeapMemory - onHeapStorageRegionSize) {
 
+  def sigveDebug(memoryMode: MemoryMode): Unit = {
+    val M: Long = 1024 * 1024;
+    val (e, s, storageRegionSize, maxMemory) = memoryMode match {
+      case MemoryMode.ON_HEAP => (
+        onHeapExecutionMemoryPool,
+        onHeapStorageMemoryPool,
+        onHeapStorageRegionSize,
+        maxHeapMemory)
+      case MemoryMode.OFF_HEAP => (
+        offHeapExecutionMemoryPool,
+        offHeapStorageMemoryPool,
+        offHeapStorageMemory,
+        maxOffHeapMemory)
+    }
+    assert(memoryMode == MemoryMode.ON_HEAP)
+    logInfo(s"[sigve] max heap ${maxMemory / M} storage region size ${storageRegionSize / M}")
+    logInfo(s"[sigve] storage { ${s.memoryUsed / M} / ${s.poolSize / M} (${s.memoryFree / M}) } execution ${e.memoryUsed / M} / ${e.poolSize / M} (${e.memoryFree / M}) }")
+  }
+
   private def assertInvariants(): Unit = {
     assert(onHeapExecutionMemoryPool.poolSize + onHeapStorageMemoryPool.poolSize == maxHeapMemory)
     assert(
@@ -69,6 +88,85 @@ private[spark] class UnifiedMemoryManager private[memory] (
 
   override def maxOffHeapStorageMemory: Long = synchronized {
     maxOffHeapMemory - offHeapExecutionMemoryPool.memoryUsed
+  }
+
+  override def sigveShrinkStoragePool(memoryMode: MemoryMode): Unit = synchronized {
+    assertInvariants()
+    sigveDebug(memoryMode)
+    val (executionPool, storagePool, storageRegionSize, maxMemory) = memoryMode match {
+      case MemoryMode.ON_HEAP => (
+        onHeapExecutionMemoryPool,
+        onHeapStorageMemoryPool,
+        onHeapStorageRegionSize,
+        maxHeapMemory)
+      case MemoryMode.OFF_HEAP => (
+        offHeapExecutionMemoryPool,
+        offHeapStorageMemoryPool,
+        offHeapStorageMemory,
+        maxOffHeapMemory)
+    }
+    /**
+     * Grow the execution pool by evicting cached blocks, thereby shrinking the storage pool.
+     *
+     * When acquiring memory for a task, the execution pool may need to make multiple
+     * attempts. Each attempt must be able to evict storage in case another task jumps in
+     * and caches a large block between the attempts. This is called once per attempt.
+     */
+    /*
+    def maybeGrowExecutionPool(extraMemoryNeeded: Long): Unit = {
+      if (extraMemoryNeeded > 0) {
+        // There is not enough free memory in the execution pool, so try to reclaim memory from
+        // storage. We can reclaim any free memory from the storage pool. If the storage pool
+        // has grown to become larger than `storageRegionSize`, we can evict blocks and reclaim
+        // the memory that storage has borrowed from execution.
+        val memoryReclaimableFromStorage = math.max(
+          storagePool.memoryFree,
+          storagePool.poolSize - storageRegionSize)
+        logInfo(s"[sigve] sigveShrinkStoragePool memory free ${storagePool.memoryFree}, pool size ${storagePool.poolSize}, region size ${storageRegionSize}")
+        if (memoryReclaimableFromStorage > 0) {
+          // Only reclaim as much space as is necessary and available:
+          val spaceToReclaim = storagePool.freeSpaceToShrinkPool(
+            math.min(extraMemoryNeeded, memoryReclaimableFromStorage))
+          logInfo(s"[sigve] maybeGrowExecutionPool memory reclaimable ${memoryReclaimableFromStorage} memory reclaimed ${spaceToReclaim}")
+          storagePool.decrementPoolSize(spaceToReclaim)
+          executionPool.incrementPoolSize(spaceToReclaim)
+        }
+      }
+    }
+    maybeGrowExecutionPool(8L * 1024 * 1024 * 1024)
+    if (System.currentTimeMillis() > 0) {
+      return;
+    }
+    */
+    val M: Long = 1024 * 1024
+    val memoryReclaimableFromStorage = math.max(
+      storagePool.memoryFree,
+      storagePool.poolSize - storageRegionSize)
+    //if (memoryReclaimableFromStorage > 0) {
+    if (System.currentTimeMillis() > 0) {
+      // Only reclaim as much space as is necessary and available:
+      var reclaimed: Long = -1;
+      val t0 = System.currentTimeMillis();
+      try {
+        reclaimed = storagePool.sigveFreeSpaceToShrinkPool()
+        //storagePool.decrementPoolSize(reclaimed)
+      } catch {
+        case ex: Exception =>
+          logError(s"[sigve] sigveShrinkStoragePool caught storagePool.sigveFreeSpaceToShrinkPool exception: ${ex}")
+          ex.printStackTrace();
+      }
+      val t1 = System.currentTimeMillis();
+      logInfo(s"[sigve] shrink: reclaimed ${reclaimed}, memory reclaimable ${memoryReclaimableFromStorage / M}, took ${t1 - t0}.")
+      synchronized {
+        /*
+        storagePool.decrementPoolSize(reclaimed)
+        sigveBudget += reclaimed
+        sigveExtensions -= reclaimed
+        */
+        org.apache.spark.memory.SigVE.epoch = t1 - t0;
+      }
+      sigveDebug(memoryMode)
+    }
   }
 
   /**
@@ -86,6 +184,8 @@ private[spark] class UnifiedMemoryManager private[memory] (
       memoryMode: MemoryMode): Long = synchronized {
     assertInvariants()
     assert(numBytes >= 0)
+    logInfo("[sigve] UnifiedMemoryManager#acquireExecutionMemory")
+    SigVE.debug();
     val (executionPool, storagePool, storageRegionSize, maxMemory) = memoryMode match {
       case MemoryMode.ON_HEAP => (
         onHeapExecutionMemoryPool,
@@ -152,6 +252,7 @@ private[spark] class UnifiedMemoryManager private[memory] (
       memoryMode: MemoryMode): Boolean = synchronized {
     assertInvariants()
     assert(numBytes >= 0)
+    logInfo(s"[sigve] UnifiedMemoryManager#acquireStorageMemory block ${blockId} bytes ${numBytes}")
     val (executionPool, storagePool, maxMemory) = memoryMode match {
       case MemoryMode.ON_HEAP => (
         onHeapExecutionMemoryPool,

@@ -52,6 +52,9 @@ private[spark] abstract class MemoryManager(
   @GuardedBy("this")
   protected val offHeapExecutionMemoryPool = new ExecutionMemoryPool(this, MemoryMode.OFF_HEAP)
 
+  SigVE.set_mm(this)
+  logInfo("[sigve] initializing mm")
+
   onHeapStorageMemoryPool.incrementPoolSize(onHeapStorageMemory)
   onHeapExecutionMemoryPool.incrementPoolSize(onHeapExecutionMemory)
 
@@ -82,6 +85,10 @@ private[spark] abstract class MemoryManager(
   final def setMemoryStore(store: MemoryStore): Unit = synchronized {
     onHeapStorageMemoryPool.setMemoryStore(store)
     offHeapStorageMemoryPool.setMemoryStore(store)
+  }
+
+  def sigveShrinkStoragePool(memoryMode: MemoryMode): Unit = {
+    return;
   }
 
   /**
